@@ -1,7 +1,7 @@
 body {
   margin: 0;
-  background: #f1f5f9;
-  color: #0f172a;
+  background: var(--bg-app);
+  color: var(--ink);
   font-family:
     Inter,
     -apple-system,
