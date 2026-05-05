@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ChartsPanel from '../components/ChartsPanel'
 import { ExplainHint } from '../components/ExplainHint'
+import { MemoryTheoryBlock } from '../components/MemoryTheoryBlock'
 import { EX } from '../content/explanations'
 import { BUILTIN_PRESETS, DEFAULT_FORM } from '../data/simulationPresets'
 
 const API_URL = 'http://127.0.0.1:8000/api/simulate/'
 const STORAGE_LAST = 'population-lab-last-form'
-const STORAGE_SAVED = 'population-lab-saved-configs'
+const STORAGE_RESULTS = 'population-lab-saved-results'
+const MAX_SAVED_RESULTS = 24
 
 const parseNumberArray = (text) =>
   text
@@ -16,33 +18,37 @@ const parseNumberArray = (text) =>
     .filter(Boolean)
     .map((value) => Number(value))
 
+function normalizeStored(raw) {
+  if (!raw || typeof raw !== 'object') return { ...DEFAULT_FORM }
+  return { ...DEFAULT_FORM, ...raw }
+}
+
 function loadLastForm() {
   try {
     const raw = localStorage.getItem(STORAGE_LAST)
     if (!raw) return null
     const data = JSON.parse(raw)
-    if (!data || typeof data !== 'object') return null
-    const keys = ['initial_population', 'fertility', 'survival', 'memory_weight', 'memory_depth', 'steps']
-    if (!keys.every((k) => k in data)) return null
-    return {
-      initial_population: String(data.initial_population),
-      fertility: String(data.fertility),
-      survival: String(data.survival),
-      memory_weight: Number(data.memory_weight),
-      memory_depth: Number(data.memory_depth),
-      steps: Number(data.steps),
-    }
+    return normalizeStored(data)
   } catch {
     return null
   }
 }
 
-function loadSavedList() {
+function loadSavedResults() {
   try {
-    const raw = localStorage.getItem(STORAGE_SAVED)
+    const raw = localStorage.getItem(STORAGE_RESULTS)
     if (!raw) return []
     const list = JSON.parse(raw)
-    return Array.isArray(list) ? list : []
+    if (!Array.isArray(list)) return []
+    return list.filter(
+      (x) =>
+        x &&
+        typeof x === 'object' &&
+        x.id &&
+        x.result &&
+        x.result.time_series &&
+        Array.isArray(x.result.time_series),
+    )
   } catch {
     return []
   }
@@ -56,9 +62,9 @@ function persistLast(form) {
   }
 }
 
-function persistSaved(list) {
+function persistResults(list) {
   try {
-    localStorage.setItem(STORAGE_SAVED, JSON.stringify(list))
+    localStorage.setItem(STORAGE_RESULTS, JSON.stringify(list.slice(0, MAX_SAVED_RESULTS)))
   } catch {
     /* ignore */
   }
@@ -67,197 +73,353 @@ function persistSaved(list) {
 function SimulatorPage() {
   const initialForm = useMemo(() => loadLastForm() ?? { ...DEFAULT_FORM }, [])
   const [form, setForm] = useState(initialForm)
-  const [presetValue, setPresetValue] = useState(() => (loadLastForm() ? 'custom' : 'builtin:standard'))
-  const [savedConfigs, setSavedConfigs] = useState(() => loadSavedList())
-  const [saveName, setSaveName] = useState('')
+  const [activePresetId, setActivePresetId] = useState(() => (loadLastForm() ? 'custom' : 'standard'))
+  const [savedRuns, setSavedRuns] = useState(() => loadSavedResults())
+  const [resultSaveName, setResultSaveName] = useState('')
   const [result, setResult] = useState(null)
   const [simulationKey, setSimulationKey] = useState(0)
   const [chartType, setChartType] = useState('line')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
+  const abortRef = useRef(null)
+
   const applyForm = useCallback((next) => {
-    setForm({ ...next })
+    setForm(normalizeStored(next))
   }, [])
 
-  const handlePresetChange = (event) => {
-    const value = event.target.value
-    setPresetValue(value)
-    if (value.startsWith('builtin:')) {
-      const id = value.replace('builtin:', '')
-      const p = BUILTIN_PRESETS.find((x) => x.id === id)
-      if (p) applyForm({ ...p.form })
-      return
-    }
-    if (value.startsWith('saved:')) {
-      const id = value.replace('saved:', '')
-      const found = savedConfigs.find((x) => x.id === id)
-      if (found) applyForm({ ...found.form })
-    }
-  }
-
-  const handleSaveCustom = () => {
-    const name = saveName.trim() || `Набор ${savedConfigs.length + 1}`
-    const id =
-      typeof crypto !== 'undefined' && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `s-${Date.now()}`
-    const entry = { id, name, form: { ...form } }
-    const next = [...savedConfigs, entry]
-    setSavedConfigs(next)
-    persistSaved(next)
-    setPresetValue(`saved:${id}`)
-    setSaveName('')
+  const selectPreset = (presetId) => {
+    const p = BUILTIN_PRESETS.find((x) => x.id === presetId)
+    if (!p) return
+    setActivePresetId(presetId)
+    applyForm({ ...DEFAULT_FORM, ...p.form })
   }
 
   const handleChange = (event) => {
-    const { name, value } = event.target
-    setPresetValue('custom')
+    const { name, value, type, checked } = event.target
+    setActivePresetId('custom')
     setForm((prev) => ({
       ...prev,
-      [name]: value,
+      [name]: type === 'checkbox' ? checked : value,
     }))
   }
 
   const handleSlider = (name, numeric) => {
-    setPresetValue('custom')
+    setActivePresetId('custom')
     setForm((prev) => ({
       ...prev,
       [name]: numeric,
     }))
   }
 
+  const resetLeslieClassic = () => {
+    setActivePresetId('custom')
+    setForm((prev) => ({ ...prev, memory_weight: 0 }))
+  }
+
   useEffect(() => {
     persistLast(form)
   }, [form])
 
-  const handleSubmit = async (event) => {
-    event.preventDefault()
+  const buildPayload = useCallback(() => {
+    return {
+      initial_population: parseNumberArray(form.initial_population),
+      fertility: parseNumberArray(form.fertility),
+      survival: parseNumberArray(form.survival),
+      memory_weight: Number(form.memory_weight),
+      memory_depth: Number(form.memory_depth),
+      steps: Number(form.steps),
+      memory_kernel: form.memory_kernel,
+      memory_gamma: Number(form.memory_gamma),
+      memory_lag: Number(form.memory_lag),
+      include_classic_comparison: Boolean(form.include_classic_comparison),
+    }
+  }, [form])
+
+  const runSimulation = useCallback(async () => {
+    abortRef.current?.abort()
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
     setLoading(true)
     setError('')
-
     try {
-      const payload = {
-        initial_population: parseNumberArray(form.initial_population),
-        fertility: parseNumberArray(form.fertility),
-        survival: parseNumberArray(form.survival),
-        memory_weight: Number(form.memory_weight),
-        memory_depth: Number(form.memory_depth),
-        steps: Number(form.steps),
-      }
-
-      const response = await axios.post(API_URL, payload)
+      const payload = buildPayload()
+      const response = await axios.post(API_URL, payload, { signal: ctrl.signal })
       setResult(response.data)
       setSimulationKey((k) => k + 1)
     } catch (requestError) {
+      if (requestError?.code === 'ERR_CANCELED' || requestError?.name === 'CanceledError') return
       const details = requestError?.response?.data
       setError(
         typeof details === 'string'
           ? details
-          : 'Ошибка расчета. Проверьте формат массивов и диапазоны параметров.',
+          : requestError?.message === 'Network Error'
+            ? 'Нет связи с сервером (запустите backend на 127.0.0.1:8000).'
+            : 'Ошибка расчета. Проверьте формат массивов и ограничения (глубина ≤ шагов и т.д.).',
       )
       setResult(null)
     } finally {
       setLoading(false)
     }
+  }, [buildPayload])
+
+  const formSignature = useMemo(() => {
+    const copy = { ...form }
+    delete copy.auto_recalculate
+    return JSON.stringify(copy)
+  }, [form])
+
+  useEffect(() => {
+    if (!form.auto_recalculate) return undefined
+    const id = window.setTimeout(() => {
+      void runSimulation()
+    }, 450)
+    return () => window.clearTimeout(id)
+  }, [formSignature, form.auto_recalculate, runSimulation])
+
+  const handleSubmit = (event) => {
+    event.preventDefault()
+    void runSimulation()
   }
 
-  const builtinOptions = BUILTIN_PRESETS.map((p) => (
-    <option key={p.id} value={`builtin:${p.id}`}>
-      {p.name}
-    </option>
-  ))
+  const handleSaveResult = () => {
+    if (!result?.time_series?.length) return
+    const name =
+      resultSaveName.trim() ||
+      `Расчёт ${new Date().toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })}`
+    const id =
+      typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `r-${Date.now()}`
+    const entry = {
+      id,
+      name,
+      savedAt: new Date().toISOString(),
+      result: JSON.parse(JSON.stringify(result)),
+      form: { ...form },
+    }
+    const next = [entry, ...savedRuns.filter((x) => x.id !== id)].slice(0, MAX_SAVED_RESULTS)
+    setSavedRuns(next)
+    persistResults(next)
+    setResultSaveName('')
+  }
 
-  const savedOptions =
-    savedConfigs.length > 0 ? (
-      <optgroup label="Сохранённые наборы">
-        {savedConfigs.map((s) => (
-          <option key={s.id} value={`saved:${s.id}`}>
-            {s.name}
-          </option>
-        ))}
-      </optgroup>
-    ) : null
+  const handleLoadResult = (entry) => {
+    setResult(entry.result)
+    setForm(normalizeStored(entry.form))
+    setSimulationKey((k) => k + 1)
+    setActivePresetId('custom')
+  }
+
+  const handleDeleteResult = (id) => {
+    const next = savedRuns.filter((x) => x.id !== id)
+    setSavedRuns(next)
+    persistResults(next)
+  }
+
+  const lastTotal = (r) => {
+    if (!r?.totals?.length) return '—'
+    return Number(r.totals[r.totals.length - 1]).toFixed(1)
+  }
+
+  const showStressWarning = Number(form.memory_weight) > 0.5 && Number(form.memory_depth) > 35
+
+  const kernel = form.memory_kernel
 
   return (
     <>
-      <section className="card card--lift animate-card">
+      <section className="card card--lift animate-card sim-page-card">
         <h1 className="sim-h1">Симулятор</h1>
-        <p className="hint sim-lead">
-          Выберите готовый сценарий или подстройте ползунки. Векторы ниже можно не трогать, если достаточно пресета.
-        </p>
+        <MemoryTheoryBlock />
 
-        <div className="sim-toolbar">
-          <label className="sim-select-label">
-            Сценарий
-            <select className="chart-selector sim-select" value={presetValue} onChange={handlePresetChange}>
-              <option value="custom">Свой набор (текущие поля)</option>
-              <optgroup label="Готовые сценарии">{builtinOptions}</optgroup>
-              {savedOptions}
-            </select>
-          </label>
-          <div className="sim-save-row">
-            <input
-              className="sim-save-input"
-              placeholder="Имя для сохранения"
-              value={saveName}
-              onChange={(e) => setSaveName(e.target.value)}
-            />
-            <button type="button" className="btn-secondary" onClick={handleSaveCustom}>
-              Сохранить набор
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            name="include_classic_comparison"
+            checked={Boolean(form.include_classic_comparison)}
+            onChange={handleChange}
+          />
+          <span>Показать на графике Σ(t) сравнение с классикой Лесли (α = 0, тот же прогон без памяти)</span>
+        </label>
+
+        {showStressWarning && (
+          <div className="memory-warning" role="note">
+            При сильной памяти (большой α и глубина) траектория может вести себя неинтуитивно или давать численные
+            артефакты. Уменьшите α или глубину, либо отключите память кнопкой «Классика Лесли».
+          </div>
+        )}
+
+        <div className="preset-section">
+          <h2 className="preset-heading">Сценарии</h2>
+          <div className="preset-grid">
+            {BUILTIN_PRESETS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                className={`preset-card ${activePresetId === p.id ? 'preset-card--active' : ''}`}
+                onClick={() => selectPreset(p.id)}
+              >
+                <span className="preset-card-title">{p.name}</span>
+                <span className="preset-card-desc">{p.description}</span>
+              </button>
+            ))}
+            <button
+              type="button"
+              className={`preset-card preset-card--custom ${activePresetId === 'custom' ? 'preset-card--active' : ''}`}
+              onClick={() => setActivePresetId('custom')}
+            >
+              <span className="preset-card-title">Свой набор</span>
+              <span className="preset-card-desc">Ползунки и векторы вручную</span>
             </button>
           </div>
         </div>
 
+        {savedRuns.length > 0 && (
+          <div className="saved-results-section">
+            <h2 className="preset-heading">Сохранённые расчёты</h2>
+            <p className="saved-results-hint">
+              Параметры и полный ответ сервера сохранены в браузере — можно снова открыть тот же расчёт и построить графики.
+            </p>
+            <ul className="saved-results-list">
+              {savedRuns.map((run) => (
+                <li key={run.id} className="saved-result-row">
+                  <div className="saved-result-meta">
+                    <span className="saved-result-name">{run.name}</span>
+                    <span className="saved-result-sub">
+                      {new Date(run.savedAt).toLocaleString('ru-RU')} · N<sub>fin</sub> ≈ {lastTotal(run.result)}
+                    </span>
+                  </div>
+                  <div className="saved-result-actions">
+                    <button type="button" className="btn-secondary btn-compact" onClick={() => handleLoadResult(run)}>
+                      Загрузить
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-danger btn-compact"
+                      onClick={() => handleDeleteResult(run.id)}
+                    >
+                      Удалить
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="sim-form">
-          <div className="slider-panel card-inner">
-            <h2 className="sim-section-title">Параметры</h2>
-            <label className="slider-field">
-              <span>
-                Вес памяти: <strong>{Number(form.memory_weight).toFixed(2)}</strong>
-              </span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={form.memory_weight}
-                onChange={(e) => handleSlider('memory_weight', Number(e.target.value))}
-                className="slider-track"
-              />
-            </label>
-            <label className="slider-field">
-              <span>
-                Глубина памяти: <strong>{form.memory_depth}</strong> шаг.
-              </span>
-              <input
-                type="range"
-                min={1}
-                max={200}
-                step={1}
-                value={form.memory_depth}
-                onChange={(e) => handleSlider('memory_depth', Number(e.target.value))}
-                className="slider-track"
-              />
-            </label>
-            <label className="slider-field">
-              <span>
-                Шагов модели: <strong>{form.steps}</strong>
-              </span>
-              <input
-                type="range"
-                min={1}
-                max={500}
-                step={1}
-                value={form.steps}
-                onChange={(e) => handleSlider('steps', Number(e.target.value))}
-                className="slider-track"
-              />
-            </label>
+          <div className="kernel-panel card-inner">
+            <h2 className="sim-section-title">Ядро памяти</h2>
+            <div className="kernel-grid">
+              <label className="kernel-field">
+                Тип
+                <select
+                  name="memory_kernel"
+                  className="chart-selector kernel-select"
+                  value={form.memory_kernel}
+                  onChange={handleChange}
+                >
+                  <option value="rectangular">Прямоугольное (равномерное среднее по окну)</option>
+                  <option value="exponential">Экспоненциальное («забывание» недавнего)</option>
+                  <option value="lag">Запаздывание (состояние с шага t − τ)</option>
+                </select>
+              </label>
+              {kernel === 'exponential' && (
+                <label className="slider-field">
+                  <span className="slider-label-row">
+                    Жёсткость затухания γ <strong>{Number(form.memory_gamma).toFixed(2)}</strong>
+                  </span>
+                  <input
+                    type="range"
+                    min={0.05}
+                    max={8}
+                    step={0.05}
+                    value={form.memory_gamma}
+                    onChange={(e) => handleSlider('memory_gamma', Number(e.target.value))}
+                    className="slider-track"
+                  />
+                </label>
+              )}
+              {kernel === 'lag' && (
+                <label className="slider-field">
+                  <span className="slider-label-row">
+                    Запаздывание τ (шагов) <strong>{form.memory_lag}</strong>
+                  </span>
+                  <input
+                    type="range"
+                    min={1}
+                    max={Math.min(200, Number(form.steps))}
+                    step={1}
+                    value={Math.min(Number(form.memory_lag), Number(form.steps))}
+                    onChange={(e) => handleSlider('memory_lag', Number(e.target.value))}
+                    className="slider-track"
+                  />
+                </label>
+              )}
+            </div>
           </div>
 
+          <div className="slider-panel">
+            <h2 className="sim-section-title">Параметры</h2>
+            <div className="slider-stack">
+              <label className="slider-field">
+                <span className="slider-label-row">
+                  Сила памяти α <strong>{Number(form.memory_weight).toFixed(2)}</strong>
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={form.memory_weight}
+                  onChange={(e) => handleSlider('memory_weight', Number(e.target.value))}
+                  className="slider-track"
+                />
+              </label>
+              <label className="slider-field">
+                <span className="slider-label-row">
+                  Глубина окна памяти <strong>{form.memory_depth}</strong> (не больше числа шагов)
+                </span>
+                <input
+                  type="range"
+                  min={1}
+                  max={Math.min(200, Number(form.steps))}
+                  step={1}
+                  value={Math.min(Number(form.memory_depth), Number(form.steps))}
+                  onChange={(e) => handleSlider('memory_depth', Number(e.target.value))}
+                  className="slider-track"
+                />
+              </label>
+              <label className="slider-field">
+                <span className="slider-label-row">
+                  Шагов модели <strong>{form.steps}</strong> (ось времени — дискретные шаги t)
+                </span>
+                <input
+                  type="range"
+                  min={1}
+                  max={500}
+                  step={1}
+                  value={form.steps}
+                  onChange={(e) => handleSlider('steps', Number(e.target.value))}
+                  className="slider-track"
+                />
+              </label>
+            </div>
+          </div>
+
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              name="auto_recalculate"
+              checked={Boolean(form.auto_recalculate)}
+              onChange={handleChange}
+            />
+            <span>
+              Автопересчёт при изменении параметров (debounce ~0,45 с; отмена предыдущего запроса). Выключите при правке
+              векторов вручную, чтобы не дергать API на каждый символ.
+            </span>
+          </label>
+
           <details className="vectors-details">
-            <summary className="vectors-summary">Векторы (редактирование вручную)</summary>
+            <summary className="vectors-summary">Векторы (рождаемость, выживаемость, начало)</summary>
             <div className="form-grid form-grid--vectors">
               <label>
                 <span className="label-with-hint">
@@ -288,22 +450,34 @@ function SimulatorPage() {
             </div>
           </details>
 
-          <div className="form-actions">
+          <div className="form-actions form-actions--split">
             <button type="submit" className="btn-pulse" disabled={loading}>
-              {loading ? 'Расчет...' : 'Запустить модель'}
+              {loading ? 'Расчет...' : 'Запустить сейчас'}
+            </button>
+            <button type="button" className="btn-secondary" onClick={resetLeslieClassic}>
+              Классика Лесли (α = 0)
             </button>
           </div>
         </form>
         {error && <p className="error animate-fade">{error}</p>}
+
+        {result && (
+          <div className="save-result-bar">
+            <input
+              className="save-result-input"
+              placeholder="Название для сохранения результата"
+              value={resultSaveName}
+              onChange={(e) => setResultSaveName(e.target.value)}
+            />
+            <button type="button" className="btn-secondary" onClick={handleSaveResult}>
+              Сохранить результат расчёта
+            </button>
+          </div>
+        )}
       </section>
 
       {result && (
-        <ChartsPanel
-          key={simulationKey}
-          result={result}
-          chartType={chartType}
-          setChartType={setChartType}
-        />
+        <ChartsPanel key={simulationKey} result={result} chartType={chartType} setChartType={setChartType} />
       )}
     </>
   )

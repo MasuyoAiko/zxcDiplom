@@ -7,6 +7,11 @@ export const DEFAULT_FORM = {
   memory_weight: 0.25,
   memory_depth: 4,
   steps: 40,
+  memory_kernel: 'rectangular',
+  memory_gamma: 0.6,
+  memory_lag: 2,
+  include_classic_comparison: true,
+  auto_recalculate: true,
 }
 
 export const BUILTIN_PRESETS = [
@@ -21,6 +26,7 @@ export const BUILTIN_PRESETS = [
     name: 'Высокая рождаемость',
     description: 'Сильнее приток в первую группу',
     form: {
+      ...DEFAULT_FORM,
       initial_population: '80, 70, 45, 30',
       fertility: '0.05, 0.45, 0.85, 0.15',
       survival: '0.9, 0.85, 0.7',
@@ -34,6 +40,7 @@ export const BUILTIN_PRESETS = [
     name: 'Сильная память',
     description: 'Большой вес среднего по истории',
     form: {
+      ...DEFAULT_FORM,
       initial_population: '100, 90, 60, 25',
       fertility: '0.0, 0.25, 0.65, 0.12',
       survival: '0.91, 0.87, 0.74',
@@ -43,10 +50,37 @@ export const BUILTIN_PRESETS = [
     },
   },
   {
+    id: 'exponential-kernel',
+    name: 'Эксп. ядро',
+    description: 'Экспоненциальное взвешивание прошлого',
+    form: {
+      ...DEFAULT_FORM,
+      memory_kernel: 'exponential',
+      memory_gamma: 1.2,
+      memory_depth: 12,
+      memory_weight: 0.4,
+      steps: 48,
+    },
+  },
+  {
+    id: 'lag-kernel',
+    name: 'Запаздывание',
+    description: 'Фиксированный лаг τ = 3 шага',
+    form: {
+      ...DEFAULT_FORM,
+      memory_kernel: 'lag',
+      memory_lag: 3,
+      memory_depth: 10,
+      memory_weight: 0.35,
+      steps: 55,
+    },
+  },
+  {
     id: 'short-run',
     name: 'Короткий горизонт',
-    description: 'Мало шагов, лёгкая проверка',
+    description: 'Мало шагов',
     form: {
+      ...DEFAULT_FORM,
       initial_population: '50, 40, 30, 15',
       fertility: '0.0, 0.35, 0.6, 0.08',
       survival: '0.93, 0.89, 0.75',
@@ -58,8 +92,9 @@ export const BUILTIN_PRESETS = [
   {
     id: 'low-survival',
     name: 'Ниже выживаемость',
-    description: 'Быстрее «вымывание» старших групп',
+    description: 'Быстрее вымывание старших',
     form: {
+      ...DEFAULT_FORM,
       initial_population: '200, 100, 40, 10',
       fertility: '0.0, 0.28, 0.55, 0.1',
       survival: '0.75, 0.7, 0.55',

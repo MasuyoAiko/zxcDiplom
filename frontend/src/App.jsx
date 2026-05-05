@@ -1,7 +1,6 @@
 import { NavLink, Route, Routes } from 'react-router-dom'
 import HomePage from './pages/HomePage'
 import SimulatorPage from './pages/SimulatorPage'
-import AboutPage from './pages/AboutPage'
 import { ThemeToggle } from './components/ThemeToggle'
 import './App.css'
 
@@ -35,7 +34,6 @@ function App() {
               Главная
             </NavLink>
             <NavLink to="/simulator">Симулятор</NavLink>
-            <NavLink to="/about">О проекте</NavLink>
           </nav>
           <ThemeToggle />
         </div>
@@ -45,7 +43,6 @@ function App() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/simulator" element={<SimulatorPage />} />
-          <Route path="/about" element={<AboutPage />} />
         </Routes>
       </main>
 

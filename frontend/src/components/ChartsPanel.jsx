@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { downloadChartStripAsPng } from '../utils/chartPngExport'
 import {
   Area,
   AreaChart,
@@ -40,13 +41,22 @@ function buildDataset(result) {
   if (!result?.time_series?.length) {
     return { rows: [], labels: [], maxStep: 0 }
   }
-  const labels = result.time_series[0].ages.map((_, idx) => `Возраст ${idx + 1}`)
+  const labels = result.time_series[0].ages.map((_, idx) => `Группа ${idx + 1}`)
+  const classicByStep = {}
+  if (result.classic_time_series?.length) {
+    result.classic_time_series.forEach((p) => {
+      classicByStep[p.step] = Number(p.total)
+    })
+  }
   const rows = result.time_series.map((point) => {
     const rawSum = point.ages.reduce((a, b) => a + b, 0)
     const row = {
       step: point.step,
       total: Number(point.total.toFixed(6)),
       _sum: rawSum,
+    }
+    if (classicByStep[point.step] !== undefined) {
+      row.classic_total = classicByStep[point.step]
     }
     point.ages.forEach((v, idx) => {
       const n = Number(v)
@@ -62,11 +72,46 @@ function buildDataset(result) {
 function TotalChart({ chartType, data, gridStroke }) {
   if (!data.length) return null
 
+  const hasClassic = data.some((r) => r.classic_total !== undefined && r.classic_total !== null)
+
+  if (hasClassic) {
+    return (
+      <LineChart data={data} margin={{ top: 8, right: 8, left: 8, bottom: 20 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+        <XAxis dataKey="step" label={{ value: 'Шаг t', position: 'insideBottom', offset: -12, fontSize: 12 }} />
+        <YAxis label={{ value: 'Численность', angle: -90, position: 'insideLeft', fontSize: 11 }} />
+        <Tooltip contentStyle={{ borderRadius: 12 }} />
+        <Legend />
+        <Line
+          type="monotone"
+          dataKey="total"
+          name="С моделью памяти"
+          stroke="#4f46e5"
+          dot={false}
+          strokeWidth={2}
+        />
+        <Line
+          type="monotone"
+          dataKey="classic_total"
+          name="Классика Лесли (α = 0)"
+          stroke="#94a3b8"
+          strokeDasharray="6 4"
+          dot={false}
+          strokeWidth={2}
+        />
+      </LineChart>
+    )
+  }
+
   if (chartType === 'composed') {
     return (
       <ComposedChart data={data}>
         <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
-        <XAxis dataKey="step" tick={{ fontSize: 12 }} />
+        <XAxis
+          dataKey="step"
+          tick={{ fontSize: 12 }}
+          label={{ value: 'Шаг t', position: 'insideBottom', offset: -8, fontSize: 11 }}
+        />
         <YAxis yAxisId="left" tick={{ fontSize: 12 }} />
         <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 12 }} />
         <Tooltip contentStyle={{ borderRadius: 12 }} />
@@ -250,12 +295,28 @@ function PhaseChart({ data, gridStroke }) {
   )
 }
 
+function AgePyramidChart({ data, gridStroke }) {
+  if (!data.length) return null
+  return (
+    <BarChart layout="vertical" data={data} margin={{ top: 8, right: 16, left: 8, bottom: 8 }}>
+      <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} horizontal={false} />
+      <XAxis type="number" tick={{ fontSize: 11 }} label={{ value: 'Численность', position: 'insideBottom', offset: -4, fontSize: 11 }} />
+      <YAxis type="category" dataKey="name" width={92} tick={{ fontSize: 11 }} />
+      <Tooltip formatter={(v) => Number(v).toFixed(3)} contentStyle={{ borderRadius: 12 }} />
+      <Bar dataKey="value" fill="#6366f1" radius={[0, 6, 6, 0]} name="Численность" />
+    </BarChart>
+  )
+}
+
 function ChartsPanel({ result, chartType, setChartType }) {
   const gridStroke = useChartGridStroke()
+  const pngStripRef = useRef(null)
   const { rows, labels, maxStep } = useMemo(() => buildDataset(result), [result])
   const [winStart, setWinStart] = useState(0)
   const [winEnd, setWinEnd] = useState(maxStep)
-  const [sliceStep, setSliceStep] = useState(maxStep)
+
+  /** Пирамида и круг долей — по правому краю окна времени */
+  const structureStep = winEnd
 
   const visibleRows = useMemo(() => {
     return rows.filter((r) => r.step >= winStart && r.step <= winEnd)
@@ -271,29 +332,41 @@ function ChartsPanel({ result, chartType, setChartType }) {
   }, [visibleRows])
 
   const pieRows = useMemo(() => {
-    const row = rows.find((r) => r.step === sliceStep) ?? rows[rows.length - 1]
+    const row = rows.find((r) => r.step === structureStep) ?? rows[rows.length - 1]
     if (!row) return []
     return labels.map((name, idx) => ({
       name,
       value: Math.max(0, row[`age${idx}`] ?? 0),
     }))
-  }, [rows, labels, sliceStep])
+  }, [rows, labels, structureStep])
 
   const sliceSummary = useMemo(() => {
-    const row = rows.find((r) => r.step === sliceStep)
+    const row = rows.find((r) => r.step === structureStep)
     if (!row) return null
     const sum = row._sum ?? labels.reduce((acc, _, idx) => acc + (row[`age${idx}`] ?? 0), 0)
     return { total: row.total, sum }
-  }, [rows, labels, sliceStep])
+  }, [rows, labels, structureStep])
 
   const totalChartMode = chartType === 'normalized' ? 'line' : chartType === 'composed' ? 'composed' : chartType
   const groupsChartMode = chartType === 'composed' ? 'line' : chartType
+
+  const hasClassic = Boolean(result?.classic_time_series?.length)
+
+  const onExportPng = useCallback(() => {
+    void downloadChartStripAsPng(pngStripRef.current, `population-lab-grafiki-${Date.now()}.png`)
+  }, [])
 
   return (
     <>
       <section className="card card--lift animate-card">
         <div className="panel-head">
           <h2 className="chart-section-title">Визуализация и окно времени</h2>
+          {hasClassic && (
+            <p className="chart-compare-note">
+              На графике Σ(t) сравнение: <strong>с памятью</strong> и <strong>классика Лесли</strong> (α = 0) с теми же
+              векторами.
+            </p>
+          )}
         </div>
 
         <div className="controls-grid">
@@ -345,18 +418,6 @@ function ChartsPanel({ result, chartType, setChartType }) {
               </label>
             </div>
           </div>
-
-          <div className="control-block">
-            <span className="control-label">Шаг для круговой диаграммы: {sliceStep}</span>
-            <input
-              type="range"
-              min={0}
-              max={maxStep}
-              value={sliceStep}
-              onChange={(e) => setSliceStep(Number(e.target.value))}
-              className="slider-track slider-track--wide"
-            />
-          </div>
         </div>
 
         {chartType === 'normalized' && (
@@ -366,8 +427,14 @@ function ChartsPanel({ result, chartType, setChartType }) {
         )}
       </section>
 
+      <div ref={pngStripRef} className="chart-png-capture" data-chart-strip="1">
+        <div className="chart-png-banner">
+          <strong>Population Lab</strong> · снимок графиков · окно шагов {winStart}—{winEnd} · пирамида и доли: t ={' '}
+          {structureStep}
+        </div>
+
       <section className="card card--lift animate-card chart-card">
-        <h2 className="chart-section-title">Общая численность</h2>
+        <h2 className="chart-section-title chart-section-title--solo">Общая численность N(t)</h2>
         <div className="chart-surface animate-chart">
           <ResponsiveContainer width="100%" height={300}>
             <TotalChart chartType={totalChartMode} data={visibleRows} gridStroke={gridStroke} />
@@ -376,7 +443,7 @@ function ChartsPanel({ result, chartType, setChartType }) {
       </section>
 
       <section className="card card--lift animate-card chart-card">
-        <h2 className="chart-section-title">Возрастные группы</h2>
+        <h2 className="chart-section-title chart-section-title--solo">Возрастные группы</h2>
         <div className="chart-surface animate-chart">
           <ResponsiveContainer width="100%" height={380}>
             <GroupsChart
@@ -390,7 +457,19 @@ function ChartsPanel({ result, chartType, setChartType }) {
       </section>
 
       <section className="card card--lift animate-card chart-card">
-        <h2 className="chart-section-title">Фазовая плоскость N(t) ↔ N(t+1)</h2>
+        <h2 className="chart-section-title chart-section-title--solo">
+          Возрастная пирамида на шаге {structureStep}
+        </h2>
+        <p className="slice-summary">Гистограмма численности по группам (те же данные, что и в таблице ниже).</p>
+        <div className="chart-surface animate-chart">
+          <ResponsiveContainer width="100%" height={Math.max(200, labels.length * 40)}>
+            <AgePyramidChart data={pieRows} gridStroke={gridStroke} />
+          </ResponsiveContainer>
+        </div>
+      </section>
+
+      <section className="card card--lift animate-card chart-card">
+        <h2 className="chart-section-title chart-section-title--solo">Фазовая плоскость N(t) ↔ N(t+1)</h2>
         <div className="chart-surface animate-chart">
           <ResponsiveContainer width="100%" height={320}>
             <PhaseChart data={phaseData} gridStroke={gridStroke} />
@@ -399,10 +478,10 @@ function ChartsPanel({ result, chartType, setChartType }) {
       </section>
 
       <section className="card card--lift animate-card chart-card">
-        <h2 className="chart-section-title">Структура на выбранном шаге</h2>
+        <h2 className="chart-section-title chart-section-title--solo">Доли групп (круг)</h2>
         {sliceSummary && (
           <p className="slice-summary animate-fade">
-            Шаг {sliceStep}: Σ = {sliceSummary.total.toFixed(3)} · проверка суммы групп = {sliceSummary.sum.toFixed(3)}
+            Шаг {structureStep}: Σ = {sliceSummary.total.toFixed(3)} · проверка суммы групп = {sliceSummary.sum.toFixed(3)}
           </p>
         )}
         <div className="pie-row">
@@ -456,6 +535,19 @@ function ChartsPanel({ result, chartType, setChartType }) {
             </table>
           </div>
         </div>
+      </section>
+      </div>
+
+      <section className="card card--lift chart-png-export-card">
+        <p className="chart-png-export-title">Скачать графики</p>
+        <p className="chart-png-export-hint">
+          Один вертикальный PNG со всеми карточками графиков из блока выше (как на экране, с учётом окна по времени; пирамида и
+          доли соответствуют правому краю окна). Если часть области пустая, прокрутите страницу так, чтобы блоки были отрисованы,
+          и нажмите снова.
+        </p>
+        <button type="button" className="btn-png-export" onClick={onExportPng}>
+          Скачать все графики (PNG)
+        </button>
       </section>
     </>
   )
